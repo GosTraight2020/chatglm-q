@@ -45,7 +45,7 @@ def create_quant_int8_model(config = ChatGLM2Config(), dtype=None):
         prev_linear, prev_embedding = modeling.Linear, modeling.Embedding
         modeling.Linear, modeling.Embedding = DynamicQuantizeLinear, QEmbedding
 
-        return ChatGLM2Model(config, dtype)
+        return ChatGLM2Model(config, config.vocab_size, dtype)
     finally:
         modeling.Linear, modeling.Embedding = prev_linear, prev_embedding
 
@@ -60,7 +60,7 @@ def create_quant_int4_model(config=ChatGLM2Config(), group_size=32, dtype=None):
         qlinear.DEFAULT_GROUP_SIZE = group_size
         modeling.Linear, modeling.Embedding = DynamicQuantizeLinear, QEmbedding
 
-        return ChatGLM2Model(config, dtype)
+        return ChatGLM2Model(config, config.vocab_size, dtype)
     finally:
         qlinear.DEFAULT_GROUP_SIZE = prev_group_size
         modeling.Linear, modeling.Embedding = prev_linear, prev_embedding
@@ -79,7 +79,7 @@ def load_model_and_tokenizer(
     model = None
     if load_model:
         if config.quant_type == "none":
-            model = ChatGLM2Model(config.model_config, torch_dtype)
+            model = ChatGLM2Model(config.model_config, config.model_config.vocab_size, torch_dtype)
         elif config.quant_type == "int8":
             model = create_quant_int8_model(config.model_config, torch_dtype)
         elif config.quant_type == "int4g32":

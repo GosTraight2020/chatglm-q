@@ -32,7 +32,6 @@ def unpack_int4(x: torch.Tensor, x_scale: torch.Tensor):
     x = x.reshape((G, GROUP_K, N)) * x_scale[:, None, :]
     return x.reshape((K, N))
 
-
 class DynamicQuantizeMatMul(torch.autograd.Function):
     '''
     A: tensor(float) m × k
@@ -66,7 +65,6 @@ class DynamicQuantizeMatMul(torch.autograd.Function):
     @staticmethod
     def symbolic(g: torch.Graph, A, B, b_scale) -> torch.Value:
         raise NotImplementedError()
-
 
 def dynamic_quant_matmul(A: Tensor, B: torch.CharTensor, b_scale: Tensor) -> Tensor:
     return DynamicQuantizeMatMul.apply(A, B, b_scale)

@@ -4,7 +4,7 @@ from typing import Optional
 from torch import nn, Tensor
 import torch.nn.functional as F
 from dataclasses import dataclass
-
+from typing import Tuple, List
 
 @dataclass
 class ChatGLM2Config():
@@ -49,7 +49,7 @@ def apply_rotary_emb(
     x: Tensor,          # (n_batch, n_seq, n_groups, n_head, d_head // 2, 2)
     freqs_cis: Tensor,  # (n_batch, n_seq, 1, 1, d_head // 2, 2)
 ) -> Tensor:
-    if ROTARY_VIEW_AS_COMPLEX and x.dtype in [torch.float32, torch.float16]:
+    if  x.dtype in [torch.float32, torch.float16]:
         x = torch.view_as_complex(x)
         freqs_cis = torch.view_as_complex(freqs_cis)
         return torch.view_as_real(x * freqs_cis).flatten(-2)
@@ -62,7 +62,7 @@ def apply_rotary_emb(
 class RMSNorm(nn.Module):
     def __init__(self, normalized_shape: tuple[int, ...], eps=1e-5, device=None, dtype=None) -> None:
         super().__init__()
-        self.weight = nn.Parameter(torch.ones(normalized_shape, device=device, dtype=dtype))
+        self.weight = nn.Parameter(torch.ones(normalized_shape, device=device, dtype=dtype), requires_grad=False)
         self.eps = eps
 
     def _norm(self, x: Tensor):
@@ -111,13 +111,14 @@ class ChatGLM2Attention(nn.Module):
         self.qkv_proj = Linear(n_state, d_head * (n_head + 2 * n_groups), bias=qkv_bias, dtype=dtype)
         self.o_proj = Linear(d_head * n_head, n_state, bias=o_bias, dtype=dtype)
         self.dropout = nn.Dropout(dropout_rate)
+        self.dtype=dtype
 
     def forward(
         self,
         x: Tensor,
         freqs_cis: Tensor,
         attention_mask: Optional[Tensor] = None,
-        kv_cache: Optional[tuple[Tensor, ...]] = None,
+        kv_cache: Optional[Tuple[Tensor, Tensor]] = None,
     ):
         '''
         x:
@@ -149,7 +150,7 @@ class ChatGLM2Attention(nn.Module):
         k = apply_rotary_emb(k, freqs_cis)
 
         if kv_cache is not None:
-            k_cache, v_cache = kv_cache
+            k_cache, v_cache = kv_cache[0], kv_cache[1]
             k = torch.cat([k_cache, k], dim=1)
             v = torch.cat([v_cache, v], dim=1)
         kv_cache = (k.detach(), v.detach())
@@ -161,6 +162,7 @@ class ChatGLM2Attention(nn.Module):
         # maybe useless, test needed
         # scaling_coeff = float(self.layer_idx + 1)
         q = q / (math.sqrt(d_head)) #  * scaling_coeff)
+        q = q.to(self.dtype)
 
         # (n_batch, n_group, n_heads, n_seq, n_seq_past)
         qk = torch.matmul(q, k) # / math.sqrt(d_head) # no need to scale again
@@ -232,7 +234,7 @@ class ChatGLM2Block(nn.Module):
         x: Tensor,
         freqs_cis: Tensor,
         attention_mask: Optional[Tensor] = None,
-        kv_cache: Optional[tuple[Tensor, ...]] = None,
+        kv_cache: Optional[Tuple[Tensor, Tensor]]  = None,
     ):
         h, kv_cache = self.attn(
             x=self.attn_ln(x),
@@ -247,9 +249,10 @@ class ChatGLM2Block(nn.Module):
 
 
 class ChatGLM2Model(nn.Module):
-    def __init__(self, config: ChatGLM2Config, dtype=None):
+    def __init__(self, config: ChatGLM2Config, vocab_size: int, dtype=None):
         super().__init__()
         self.config = config
+        self.vocab_size = vocab_size
         self.word_embedding = Embedding(
             num_embeddings=config.vocab_size, embedding_dim=config.hidden_size, dtype=dtype
         )
@@ -275,7 +278,7 @@ class ChatGLM2Model(nn.Module):
         input_embeddings: Optional[torch.FloatTensor] = None,
         attention_mask: Optional[torch.LongTensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[tuple[tuple[Tensor, ...], ...]] = None,
+        past_key_values: Optional[List[Tuple[Tensor, Tensor]]] = None,
     ) -> tuple[Tensor, Tensor, Tensor]:
         """
         returns: (
@@ -311,7 +314,7 @@ class ChatGLM2Model(nn.Module):
         seq = torch.arange(n_seq, device=device)
         causal_mask = (seq[:, None] < seq[None, :])
         # make attention_mask to a float causal mask
-        attention_mask = (causal_mask[None, ...] | ~attention_mask[:, None, :].bool()).float() * -1e10
+        attention_mask = (causal_mask[None, ...] | ~(attention_mask[:, None, :]>0)).float() * -1e10
 
         # align to input_ids
         attention_mask = attention_mask[:, -n_seq_new:]
@@ -325,7 +328,7 @@ class ChatGLM2Model(nn.Module):
             attention_mask,
             freqs_cis,
         )
-
+    # @torch.jit.script_method
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,
@@ -333,7 +336,7 @@ class ChatGLM2Model(nn.Module):
         attention_mask: Optional[torch.LongTensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
         labels: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[tuple[tuple[Tensor, ...], ...]] = None,
+        past_key_values:Optional[List[Tuple[Tensor, Tensor]]]= None,
     ):
         '''
         input_ids:
@@ -367,22 +370,26 @@ class ChatGLM2Model(nn.Module):
 
         # forward layers
         h = self.dropout(input_embeddings)
-        current_key_values = tuple()
+        current_key_values = []
+        current_key_values = torch.jit.annotate(List[Tuple[Tensor, Tensor]],[])
         for i, layer in enumerate(self.layers):
             kv_cache = past_key_values[i] if past_key_values is not None else None
-            h, kv_cache = layer(
+            h, new_kv_cache = layer(
                 h,
                 attention_mask=attention_mask,
                 freqs_cis=freqs_cis,
                 kv_cache=kv_cache,
             )
-            current_key_values += (kv_cache, )
+
+            # current_key_values.extend(kv_cache
+            # print(type(kv_cache))
+            current_key_values.append(new_kv_cache)
 
         h = self.final_ln(h)
         output: Tensor = self.lm_head(h)
 
         if labels is not None:
-            n_classes = self.config.vocab_size
+            n_classes = self.vocab_size
             shift_logits = output[..., :-1, :].contiguous().float()
             shift_labels = labels[..., 1:].contiguous()
             loss = F.cross_entropy(shift_logits.view(-1, n_classes), shift_labels.view(-1))
