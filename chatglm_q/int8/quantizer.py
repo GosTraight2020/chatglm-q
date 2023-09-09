@@ -2,14 +2,14 @@ import math
 import torch
 from torch import nn, Tensor
 from .qlinear import DynamicQuantizeLinear, QEmbedding
-
+from typing import Tuple, List
 
 max_q_int8 = 2 ** (8 - 1) - 1
 assert 127 == max_q_int8
 
 
 @torch.no_grad()
-def quantize_int8(inputs: Tensor) -> tuple[torch.CharTensor, Tensor]:
+def quantize_int8(inputs: Tensor) -> Tuple[torch.CharTensor, Tensor]:
     '''
     inputs: for weight (out_dim, in_dim), for activation (...channels, features)
     '''
@@ -71,7 +71,7 @@ class GPTQLinearQuantizer():
         self.debug_input = None
 
     @torch.no_grad()
-    def forward_hook(self, module: nn.Module, inputs: tuple[Tensor], output: Tensor):
+    def forward_hook(self, module: nn.Module, inputs: Tuple[Tensor], output: Tensor):
         input, = inputs
         if len(input.shape) > 2:
             input = input.flatten(0, -2)

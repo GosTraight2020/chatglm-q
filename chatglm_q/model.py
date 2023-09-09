@@ -60,23 +60,40 @@ def apply_rotary_emb(
 
 
 class RMSNorm(nn.Module):
-    def __init__(self, normalized_shape: tuple[int, ...], eps=1e-5, device=None, dtype=None) -> None:
+    def __init__(self, normalized_shape: Tuple[int], eps=1e-5, device=None, dtype=None) -> None:
         super().__init__()
-        self.weight = nn.Parameter(torch.ones(normalized_shape, device=device, dtype=dtype), requires_grad=False)
+        self.weight = nn.Parameter(torch.ones(normalized_shape, dtype=dtype), requires_grad=False)
+        # self.weight = nn.Parameter(torch.ones(normalized_shape, device=device, dtype=dtype), requires_grad=False)
         self.eps = eps
 
     def _norm(self, x: Tensor):
-        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+        y = x.pow(2)
+        y = y.sum(-1, keepdim=True)
+        dim_size = x.shape[-1]
+        y = y / dim_size
+        y = y + self.eps
+        y = torch.sqrt(y)
+        y =  x * y
+        # res = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+
+        return y
 
     def forward(self, x: Tensor):
-        output = self._norm(x.float()).type_as(x)
-        return output * self.weight
+        output = x.float()
+        output = self._norm(output).type_as(x)
+
+        output = output* self.weight
+
+        return output
+        # output = self._norm(x.float()).type_as(x)
+        # return output * self.weight
 
 
 class Linear(nn.Linear):
     def forward(self, x: Tensor) -> Tensor:
-        return F.linear(x, self.weight.type_as(x),
-                        None if self.bias is None else self.bias.type_as(x))
+        x = F.linear(x, self.weight, 
+                     None if self.bias is None else self.bias)
+        return x
 
     def reset_parameters(self):
         pass
@@ -138,10 +155,15 @@ class ChatGLM2Attention(nn.Module):
         d_head, n_head, n_groups = self.d_head, self.n_head, self.n_groups
 
         fused_qkv = self.qkv_proj(x)
-        split_size = [d_head * n_head, d_head * n_groups, d_head * n_groups]
-        q, k, v = torch.split(fused_qkv, split_size, dim=-1)
 
+        split_size = [d_head * n_head, d_head * n_groups, d_head * n_groups]
+        # q, k, v = torch.split(fused_qkv, split_size, dim=-1)
+        q = fused_qkv.narrow(dim=-1, start=0, length=d_head * n_head)
+        k = fused_qkv.narrow(dim=-1, start=d_head * n_head, length= d_head * n_groups)
+        v = fused_qkv.narrow(dim=-1, start=d_head * n_groups , length=d_head * n_groups)
+        
         # allow broadcast along groups
+        q, k, v = q.to(device='cpu'), k.to(device='cpu'), v.to(device='cpu')
         q = q.view(n_batch, n_seq, n_groups, n_head // n_groups, d_head // 2, 2)
         k = k.view(n_batch, n_seq, n_groups, 1, d_head // 2, 2)
         v = v.view(n_batch, n_seq, n_groups, 1, d_head)
@@ -165,20 +187,24 @@ class ChatGLM2Attention(nn.Module):
         q = q.to(self.dtype)
 
         # (n_batch, n_group, n_heads, n_seq, n_seq_past)
+        q, k, v = q.to(device='cpu'), k.to(device='cpu'), v.to(device='cpu')
         qk = torch.matmul(q, k) # / math.sqrt(d_head) # no need to scale again
+
+
         if attention_mask is not None:
             qk = qk + attention_mask[:, None, None, :, :]
 
-        scores = F.softmax(qk.float(), dim=-1).type_as(x) # qk / scaling_coeff
-        scores = self.dropout(scores)
+        scores = F.softmax(qk.float().to(device='cpu'), dim=-1).type_as(x.to(device='cpu')) # qk / scaling_coeff
 
         output = torch.matmul(scores, v)
+
         output = output.permute(0, 3, 1, 2, 4).reshape(n_batch, n_seq, -1)
+        output = output.to(device='vulkan')
         output = self.o_proj(output)
+        output = output.to(device='vulkan')
 
         return output, kv_cache
-
-
+        
 class GatedFeedForward(nn.Module):
     def __init__(
         self,
@@ -187,7 +213,7 @@ class GatedFeedForward(nn.Module):
         dropout_rate = 0.0,
         bias = False,
         dtype = None,
-        act_fn = F.silu,
+        # act_fn = F.relu,
     ):
         super().__init__()
         hidden_dim = hidden_dim or dim * 4
@@ -196,11 +222,18 @@ class GatedFeedForward(nn.Module):
         self.w_in = Linear(dim, hidden_dim * 2, bias=bias, dtype=dtype)
         self.w_out = Linear(hidden_dim, dim, bias=bias, dtype=dtype)
         self.dropout = nn.Dropout(dropout_rate)
-        self.act_fn = act_fn
+        # self.act_fn = act_fn
 
     def forward(self, x: Tensor):
-        h, gate = torch.split(self.w_in(x), self.hidden_dim, dim=-1)
-        return self.w_out(self.dropout(self.act_fn(h) * gate))
+        x = self.w_in(x)
+        h, gate = torch.split(x, self.hidden_dim, dim=-1)
+
+        temp = F.relu(h)
+        temp = temp*gate
+        temp = self.dropout(temp)
+        temp  = self.w_out(temp)
+        return temp
+        # return self.w_out(self.dropout(self.act_fn(h) * gate))
 
 
 class ChatGLM2Block(nn.Module):
@@ -242,9 +275,12 @@ class ChatGLM2Block(nn.Module):
             attention_mask=attention_mask,
             kv_cache=kv_cache,
         )
+
         x = x + h
-        h = self.ffn(self.ffn_ln(x))
+        temp = self.ffn_ln(x)
+        h = self.ffn(temp)
         output = x + h
+
         return output, kv_cache
 
 
@@ -279,7 +315,7 @@ class ChatGLM2Model(nn.Module):
         attention_mask: Optional[torch.LongTensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
         past_key_values: Optional[List[Tuple[Tensor, Tensor]]] = None,
-    ) -> tuple[Tensor, Tensor, Tensor]:
+    ) -> Tuple[Tensor, Tensor, Tensor]:
         """
         returns: (
             input_embeddings,
@@ -289,12 +325,12 @@ class ChatGLM2Model(nn.Module):
         """
         if input_embeddings is None:
             assert input_ids is not None, "No input"
-            device = input_ids.device
+            # device = input_ids.device
             input_embeddings = self.word_embedding(input_ids)
             n_batch, n_seq_new = input_ids.shape
         else:
             assert input_ids is None, "Specify either 'input_ids' or 'input_embeddings'"
-            device = input_embeddings.device
+            # device = input_embeddings.device
             n_batch, n_seq_new, _ = input_embeddings.shape
 
         if past_key_values is not None:
@@ -304,14 +340,16 @@ class ChatGLM2Model(nn.Module):
             n_seq = n_seq_new
 
         if attention_mask is None:
-            attention_mask = torch.ones(n_batch, n_seq, dtype=torch.long, device=device)
+            attention_mask = torch.ones(n_batch, n_seq, dtype=torch.long)
+            # attention_mask = torch.ones(n_batch, n_seq, dtype=torch.long, device=device)
 
         if position_ids is None:
             position_ids = torch.cumsum(attention_mask, dim=1)
 
         # causal mask with full prefix attention
         # trilu is not supported in onnxruntime
-        seq = torch.arange(n_seq, device=device)
+        seq = torch.arange(n_seq)
+        # seq = torch.arange(n_seq, device=device)
         causal_mask = (seq[:, None] < seq[None, :])
         # make attention_mask to a float causal mask
         attention_mask = (causal_mask[None, ...] | ~(attention_mask[:, None, :]>0)).float() * -1e10
@@ -328,7 +366,7 @@ class ChatGLM2Model(nn.Module):
             attention_mask,
             freqs_cis,
         )
-    # @torch.jit.script_method
+    
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,
@@ -372,6 +410,7 @@ class ChatGLM2Model(nn.Module):
         h = self.dropout(input_embeddings)
         current_key_values = []
         current_key_values = torch.jit.annotate(List[Tuple[Tensor, Tensor]],[])
+
         for i, layer in enumerate(self.layers):
             kv_cache = past_key_values[i] if past_key_values is not None else None
             h, new_kv_cache = layer(
@@ -381,9 +420,8 @@ class ChatGLM2Model(nn.Module):
                 kv_cache=kv_cache,
             )
 
-            # current_key_values.extend(kv_cache
-            # print(type(kv_cache))
             current_key_values.append(new_kv_cache)
+
 
         h = self.final_ln(h)
         output: Tensor = self.lm_head(h)

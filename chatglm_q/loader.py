@@ -11,6 +11,7 @@ from tqdm.auto import tqdm
 from safetensors.torch import save_file, safe_open
 from .model import ChatGLM2Model, ChatGLM2Config
 from .tokenizer import ChatGLM2Tokenizer
+from typing import List, Tuple
 
 
 @dataclass
@@ -18,7 +19,7 @@ class ChatGLMLoadConfig():
     model_type: Literal["ChatGLM2Model"] = "ChatGLM2Model"
     model_config: ChatGLM2Config = field(default_factory=ChatGLM2Config)
     quant_type: Literal["none", "int8", "int4g32"] = "none"
-    weight_files: list[str] = field(default_factory=list)
+    weight_files: List[str] = field(default_factory=list)
     tokenizer_file: str = "sentencepiece.model"
     torch_dtype: Literal["float32", "float16", "bfloat16"] = "float32"
 
@@ -69,7 +70,7 @@ def create_quant_int4_model(config=ChatGLM2Config(), group_size=32, dtype=None):
 @torch.no_grad()
 def load_model_and_tokenizer(
     model_path: Union[str, Path], torch_dtype=None, load_model=True, load_tokenizer=True,
-) -> tuple[ChatGLM2Config, ChatGLM2Model, ChatGLM2Tokenizer]:
+) -> Tuple[ChatGLM2Config, ChatGLM2Model, ChatGLM2Tokenizer]:
 
     model_path = Path(model_path)
     config_path = model_path / "config.json"
@@ -81,6 +82,7 @@ def load_model_and_tokenizer(
         if config.quant_type == "none":
             model = ChatGLM2Model(config.model_config, config.model_config.vocab_size, torch_dtype)
         elif config.quant_type == "int8":
+            print(123)
             model = create_quant_int8_model(config.model_config, torch_dtype)
         elif config.quant_type == "int4g32":
             model = create_quant_int4_model(config.model_config, 32, torch_dtype)

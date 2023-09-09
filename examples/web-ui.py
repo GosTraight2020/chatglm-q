@@ -1,15 +1,20 @@
 import torch
 import streamlit as st
 from chatglm_q.decoder import ChatGLMDecoder, chat_template
-
-
+from torch.utils.mobile_optimizer import optimize_for_mobile
+from typing import Tuple, List
 # page state
 
 @st.cache_resource
 def create_model():
     device = torch.device("cpu")
     torch_dtype = torch.float
-    decoder = ChatGLMDecoder.from_pretrained("K024/chatglm2-6b-int4g32", device, torch_dtype)
+    decoder = ChatGLMDecoder.from_pretrained("/home/shanlin/pytorch-vulkan/weight_chatglm-q", torch_dtype=torch.float)
+    model = decoder.model
+    model.eval()
+    script_model = torch.jit.script(model)
+    cpu_script_model = optimize_for_mobile(script_model, backend='cpu')
+    decoder.model = cpu_script_model
     # decoder.time_log = True # log generation performance
     return decoder
 
@@ -45,7 +50,7 @@ with st.sidebar:
 
 st.markdown("## ChatGLM2")
 
-history: list[tuple[str, str]] = st.session_state.history
+history: List[Tuple[str, str]] = st.session_state.history
 
 if len(history) == 0:
     st.caption("请在下方输入消息开始会话")

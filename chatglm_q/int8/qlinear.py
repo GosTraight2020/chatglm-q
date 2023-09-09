@@ -72,6 +72,7 @@ class DynamicQuantizeMatMul(torch.autograd.Function):
 
 def dynamic_quant_matmul(A: Tensor, B: torch.CharTensor, b_scale: Tensor) -> Tensor:
     return DynamicQuantizeMatMul.apply(A, B, b_scale)
+    # return 0
 
 
 class DynamicQuantizeLinear(nn.Module):
@@ -87,9 +88,14 @@ class DynamicQuantizeLinear(nn.Module):
             self.register_buffer('bias', None)
 
     def forward(self, input: Tensor):
-        out = dynamic_quant_matmul(input, self.weight.t(), self.weight_scale)
+        # out = dynamic_quant_matmul(input, self.weight.t(), self.weight_scale)
+        input = input.to(device='cpu')
+        self.weight = self.weight.to(device='cpu')
+        self.weight_scale = self.weight_scale.to(device='cpu')
+        out = input.matmul(self.weight.t() * self.weight_scale)
         if self.bias is not None:
             out += self.bias
+        out = out.to(device='vulkan')
         return out
 
     @torch.no_grad()
@@ -105,6 +111,7 @@ class DynamicQuantizeLinear(nn.Module):
 
     def reset_parameters(self):
         pass
+
 
 
 class QEmbedding(nn.Module):

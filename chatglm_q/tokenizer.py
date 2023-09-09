@@ -3,9 +3,9 @@ import numpy
 import torch
 from typing import Any, Union, Literal
 from sentencepiece import SentencePieceProcessor
+from typing import Dict, List
 
-
-class BatchEncoding(dict[str, torch.Tensor]):
+class BatchEncoding(Dict[str, torch.Tensor]):
     def to(self, device):
         for key in list(self.keys()):
             if isinstance(self[key], torch.Tensor):
@@ -45,7 +45,7 @@ class ChatGLM2Tokenizer:
 
     def encode(
         self, text: str, text_pair: str = None, add_special_tokens=True,
-    ) -> list[int]:
+    ) -> List[int]:
         """
         text: Text to encode.
         text_pair: Expected answer to encode.
@@ -63,15 +63,15 @@ class ChatGLM2Tokenizer:
 
         return tokens
 
-    def decode(self, text_ids: list[int]) -> str:
+    def decode(self, text_ids: List[int]) -> str:
         text_ids = list(filter(lambda x: x < self.true_vocab_size, text_ids))
         text = self.text_tokenizer.decode(text_ids)
         return text
 
     def __call__(
         self,
-        text: Union[str, list[str]],
-        text_pair: Union[str, list[str]] = None,
+        text: Union[str, List[str]],
+        text_pair: Union[str, List[str]] = None,
         add_special_tokens = True,
         padding: Literal[True, False, "left", "right"] = False, # default pad to left
         max_length: int = None,

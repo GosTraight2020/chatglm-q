@@ -7,7 +7,7 @@ from huggingface_hub import snapshot_download
 from .model import ChatGLM2Model
 from .tokenizer import ChatGLM2Tokenizer
 from .loader import ChatGLMLoadConfig, load_model_and_tokenizer, save_model_and_tokenizer
-
+from typing import List, Tuple
 
 def top_p_sampling(logits: torch.Tensor, top_k=100, top_p=0.8, temperature=1.0):
     # top_k
@@ -41,7 +41,7 @@ class ChatGLMDecoder():
         self.config = config
         self.model = model
         self.tokenizer = tokenizer
-        self.device = device
+        # self.device = device
         self.eos_token_id = tokenizer[eos_token]
         self.max_sequence_length = max_sequence_length or config.model_config.max_sequence_length
         self.time_log = time_log
@@ -54,8 +54,10 @@ class ChatGLMDecoder():
             assert isinstance(path_or_repo_id, str)
             path = snapshot_download(path_or_repo_id, cache_dir=cache_dir, token=token)
         config, model, tokenizer = load_model_and_tokenizer(path, torch_dtype)
-        model.to(device=device)
-        return ChatGLMDecoder(config, model, tokenizer, device=device)
+        # model.to(device=device)
+        return ChatGLMDecoder(config, model, tokenizer)
+        # return ChatGLMDecoder(config, model, tokenizer, device=device)
+
 
 
     def save_pretrained(self, path: Union[Path, str], shard=True):
@@ -79,7 +81,8 @@ class ChatGLMDecoder():
             with torch.no_grad():
                 start_time = time.perf_counter()
                 _, logits, past_key_values = model(
-                    input_ids=input_ids.to(self.device),
+                    input_ids=input_ids,
+                    # input_ids=input_ids.to(self.device),
                     past_key_values=past_key_values,
                 )
                 next_token = top_p_sampling(logits[0, -1], top_k, top_p, temperature).item()
@@ -108,7 +111,7 @@ class ChatGLMDecoder():
         return process_response(tokenizer.decode(generated_tokens))
 
 
-def chat_template(history: list[tuple[str, str]], current: str):
+def chat_template(history: List[Tuple[str, str]], current: str):
     prompt = ""
     chat_round = 1
     for question, answer in history:
